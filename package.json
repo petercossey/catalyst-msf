@@ -119,7 +119,7 @@
   },
   "catalyst": {
     "version": "1.10.0",
-    "ref": "7c0b85dfc408bc3a9be39705b028065314470ee6"
+    "ref": "@bigcommerce/catalyst-makeswift@1.10.0"
   },
   "pnpm": {
     "onlyBuiltDependencies": [
