@@ -26,6 +26,7 @@ import { scriptsTransformer } from '~/data-transformers/scripts-transformer';
 import { routing } from '~/i18n/routing';
 import { SiteTheme } from '~/lib/makeswift/components/site-theme';
 import { MakeswiftProvider } from '~/lib/makeswift/provider';
+import { getSiteBaseUrl } from '~/lib/seo/canonical';
 import { getToastNotification } from '~/lib/server-toast';
 
 import '~/lib/makeswift/components';
@@ -35,9 +36,6 @@ const RootLayoutMetadataQuery = graphql(
     query RootLayoutMetadataQuery {
       site {
         settings {
-          url {
-            vanityUrl
-          }
           privacy {
             cookieConsentEnabled
             privacyPolicyUrl
@@ -76,21 +74,10 @@ export async function generateMetadata(): Promise<Metadata> {
 
   const { pageTitle, metaDescription, metaKeywords } = data.site.settings?.seo || {};
 
-  const vanityUrl = data.site.settings?.url.vanityUrl;
-
-  // Use preview deployment URL so metadataBase (canonical, og:url) points at the preview, not production.
-  let baseUrl: URL | undefined;
-  const previewUrl =
-    process.env.VERCEL_ENV === 'preview' ? `https://${process.env.VERCEL_URL}` : undefined;
-
-  if (previewUrl && URL.canParse(previewUrl)) {
-    baseUrl = new URL(previewUrl);
-  } else if (vanityUrl && URL.canParse(vanityUrl)) {
-    baseUrl = new URL(vanityUrl);
-  }
+  const siteBaseUrl = getSiteBaseUrl();
 
   return {
-    metadataBase: baseUrl,
+    metadataBase: URL.canParse(siteBaseUrl) ? new URL(siteBaseUrl) : undefined,
     title: {
       template: `%s - ${storeName}`,
       default: pageTitle || storeName,

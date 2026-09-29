@@ -13,7 +13,8 @@ One Catalyst app serves several BigCommerce channels by treating each region as 
 - / has no storefront; it redirects to a region using the cookie, then Accept-Language, then the default (/nz).
 - Locales are read at build time, so a control-panel change only takes effect after restarting dev or redeploying.
 - Makeswift needs the same locales; its default locale must match the BigCommerce default (en-NZ).
-- Custom code on top of stock is just the channel mapping, with-locale-aliases.ts (the Makeswift builder previews at /en-AU rather than /au), and the empty en-AU/en-NZ message files.
+- Domains: BigCommerce allows one site URL per channel, so the config channel owns the real domain (www.catalyst-msf.store) and every other channel gets a redirect-only host (au.catalyst-msf.store → www, via Vercel). Each channel has its own checkout domain.
+- Custom code on top of stock is just the channel mapping, with-locale-aliases.ts (the Makeswift builder previews at /en-AU rather than /au), getSiteBaseUrl() (canonical/hreflang always use the config channel's domain, not the redirect-only hosts), and the empty en-AU/en-NZ message files.
 
 ## 1. First principle: a "locale" is your region primitive
 
@@ -151,11 +152,21 @@ call `getChannelIdFromLocale(defaultLocale)` — they reflect the default region
 Multi-region sitemaps need work. `checkout/route.ts` *is* channel-aware; each channel
 has its own checkout URL.
 
-**Canonical/hreflang hosts are per channel.** `lib/seo/canonical.ts` builds absolute URLs
-from the *requesting* channel's site URL, so `/au/*` pages emit `store-…-1889990…` hosts and
-`/nz/*` pages emit `store-…-1889993…` hosts — even for their hreflang alternates. With one
-app on one domain, both channels' site URLs (or the canonical base) must resolve to that
-domain. Unresolved in this repo.
+**Domains: one storefront domain, but one site URL per channel.** BigCommerce won't let
+two channels share a site URL. So the config channel owns the real domain
+(`www.catalyst-msf.store`, checkout `checkout.catalyst-msf.store`), and every other channel
+gets a redirect-only host (AU: `au.catalyst-msf.store` → 308 to `www` in Vercel, path kept;
+checkout `checkout.au.catalyst-msf.store`). BigCommerce's links back from checkout and
+emails (site URL + site routes, e.g. "Edit cart" → `au.…/cart/`) land on `www` and pick the
+region from the `NEXT_LOCALE` cookie. Prefixing each site's routes (`/au/cart`, …) would make
+them cookie-independent — not done yet.
+
+**Canonical/hreflang use the config channel's URL.** Stock Catalyst builds absolute URLs
+from the *requesting* channel's site URL, which would make AU pages declare the
+redirect-only `au.` host and make hreflang disagree between regions. `getSiteBaseUrl()` in
+`lib/seo/canonical.ts` (also used for `metadataBase` in `app/[locale]/layout.tsx`) uses the
+config channel's `vanityUrl` from the build snapshot for every region instead. Frozen at
+build time, so site URL changes need a redeploy.
 
 ## 5. Gotchas that cost real time
 

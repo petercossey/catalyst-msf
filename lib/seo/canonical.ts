@@ -1,8 +1,4 @@
-import { cache } from 'react';
-
-import { client } from '~/client';
-import { graphql } from '~/client/graphql';
-import { revalidate } from '~/client/revalidate-target';
+import { buildConfig } from '~/build-config/reader';
 import { defaultLocale, locales, prefixes, rootLocale } from '~/i18n/locales';
 
 interface CanonicalUrlOptions {
@@ -33,40 +29,12 @@ interface CanonicalUrlOptions {
  * @param {CanonicalUrlOptions} options - The options for generating canonical URLs
  * @returns {object} The metadata alternates object with canonical URL and optional language alternates
  */
-const VanityUrlQuery = graphql(`
-  query VanityUrlQuery {
-    site {
-      settings {
-        url {
-          vanityUrl
-        }
-      }
-    }
-  }
-`);
-
-const getVanityUrl = cache(async () => {
-  const { data } = await client.fetch({
-    document: VanityUrlQuery,
-    fetchOptions: { next: { revalidate } },
-  });
-
-  const vanityUrl = data.site.settings?.url.vanityUrl;
-
-  if (!vanityUrl) {
-    throw new Error('Vanity URL not found in site settings');
-  }
-
-  return vanityUrl;
-});
-
+// Kept async so the existing `await getMetadataAlternates(...)` call sites are unchanged.
+// eslint-disable-next-line @typescript-eslint/require-await
 export async function getMetadataAlternates(options: CanonicalUrlOptions) {
   const { path, locale, includeAlternates = true } = options;
 
-  // Use preview deployment URL so canonical/hreflang URLs point at the preview, not production.
-  const previewUrl =
-    process.env.VERCEL_ENV === 'preview' ? `https://${process.env.VERCEL_URL}` : undefined;
-  const baseUrl = previewUrl && URL.canParse(previewUrl) ? previewUrl : await getVanityUrl();
+  const baseUrl = getSiteBaseUrl();
 
   const canonical = buildLocalizedUrl(baseUrl, path, locale);
 
@@ -83,6 +51,27 @@ export async function getMetadataAlternates(options: CanonicalUrlOptions) {
   languages['x-default'] = buildLocalizedUrl(baseUrl, path, defaultLocale);
 
   return { canonical, languages };
+}
+
+/**
+ * The single origin that absolute URLs (canonical, hreflang, og:url) are built on.
+ *
+ * All channels are served from one domain, so this is the config channel's site URL
+ * (`BIGCOMMERCE_CHANNEL_ID`, from the build-time snapshot) rather than the requesting
+ * channel's. BigCommerce won't let two channels share a site URL, so the other
+ * channels' URLs are redirect-only hosts; using them would make canonicals point at
+ * a redirect and hreflang alternates disagree between regions. Preview deployments
+ * use their own URL instead.
+ *
+ * @returns {string} The absolute origin to build canonical and alternate URLs on
+ */
+export function getSiteBaseUrl(): string {
+  const previewUrl =
+    process.env.VERCEL_ENV === 'preview' ? `https://${process.env.VERCEL_URL}` : undefined;
+
+  if (previewUrl && URL.canParse(previewUrl)) return previewUrl;
+
+  return buildConfig.get('urls').vanityUrl;
 }
 
 function buildLocalizedUrl(baseUrl: string, pathname: string, locale: string): string {
