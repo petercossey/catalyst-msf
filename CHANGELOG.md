@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.12.1
+
+### Patch Changes
+
+- Pulls in changes from the `@bigcommerce/catalyst-core@1.12.1` release. For more information about what was included in the `@bigcommerce/catalyst-core@1.12.1` release, see the [changelog entry](https://github.com/bigcommerce/catalyst/blob/2a00cfdbb4280da744e4e1c5d686c525ce497b6c/core/CHANGELOG.md#1121).
+
+## 1.12.0
+
+### Minor Changes
+
+- Pulls in changes from the `@bigcommerce/catalyst-core@1.12.0` release. For more information about what was included in the `@bigcommerce/catalyst-core@1.12.0` release, see the [changelog entry](https://github.com/bigcommerce/catalyst/blob/d15df6799d8928ce3be663094a573097832ef8f7/core/CHANGELOG.md#1120).
+
 ## 1.11.1
 
 ### Patch Changes
