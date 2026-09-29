@@ -4,7 +4,7 @@ How to serve multiple BigCommerce storefront channels from a **single** Catalyst
 with each channel on its own URL subpath. Examples use two channels — NZ (`1889993`) and AU
 (`1889990`) — but nothing here is specific to that pair.
 
-## Key concepts (new to BigCommerce)
+## Key concepts
 
 - **Store:** one catalog, customer base and set of API credentials.
 - **Channel (storefront):** a sales channel within the store. Each has its own product/category
