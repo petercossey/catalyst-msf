@@ -2,7 +2,7 @@
 
 How to serve multiple BigCommerce storefront channels from a **single** Catalyst app,
 with each channel on its own URL subpath. Examples use two channels — NZ (`1889993`) and AU
-(`1889990`) — but nothing here is specific to that pair.
+(`1889990`).
 
 ## Key concepts
 
@@ -19,339 +19,244 @@ with each channel on its own URL subpath. Examples use two channels — NZ (`188
 
 ## tl;dr
 
-One Catalyst app serves several BigCommerce channels by treating each region as a locale: the URL subpath picks the locale, and the locale picks the channel.
+- **A region is a locale.** Catalyst's only way to map a subpath to a channel is the locale, so
+  the subpath picks the locale (`/au` → `en-AU`) and `channels.config.ts` maps the locale to a channel.
+- **One channel configures routing.** Catalyst reads locales only from `BIGCOMMERCE_CHANNEL_ID`
+  (the *config channel*, NZ). It must carry every region's language and subfolder path:
+  `en-NZ` → `nz` (default), `en-AU` → `au`. Other channels' languages are ignored.
+- **`/` is a dispatcher, not a page.** It redirects to a region using the `NEXT_LOCALE` cookie,
+  then `Accept-Language`, then the default (`/nz`).
+- **Everything else is per channel:** catalog, slugs, cart, currency and checkout domain.
+- **One public domain.** The config channel's site URL is the real domain. Every other channel
+  gets a redirect-only host (`au.catalyst-msf.store` → `www`).
+- **Makeswift** needs the same locales, and its default must be the BigCommerce default (`en-NZ`).
+- Locale changes in the control panel go live within about 5 minutes. Code, message files and
+  site URL changes need a deploy.
 
-- Config channel (BIGCOMMERCE_CHANNEL_ID, NZ 1889993) carries every region's language and subfolder path: en-NZ → nz (default), en-AU → au.
-- Other channels carry only their own language (AU: en-AU). Catalyst ignores them.
-- channels.config.ts maps each locale to its channel: en-NZ → 1889993, en-AU → 1889990.
-- / has no storefront; it redirects to a region using the cookie, then Accept-Language, then the default (/nz).
-- Locales are read from BigCommerce at runtime (cached 5 minutes), so control-panel changes need no redeploy.
-- Each channel gets its own cart and its own currency (AU = AUD, NZ = NZD). Switching region switches both.
-- Makeswift needs the same locales; its default locale must match the BigCommerce default (en-NZ).
-- Domains: BigCommerce allows one site URL per channel, so the config channel owns the real domain (www.catalyst-msf.store) and every other channel gets a redirect-only host (au.catalyst-msf.store → www, via Vercel). Each channel has its own checkout domain.
-- Custom code on top of stock: the channel mapping, with-locale-aliases.ts (the Makeswift builder previews at /en-AU rather than /au), getSiteBaseUrl() (canonical/hreflang always use the config channel's domain), getPreferredCurrencyCode() (falls back to the channel's currency), the empty en-AU/en-NZ message files, and a backport of upstream PR #3244 (per-channel carts) until it ships.
-- Upgrade with `pnpm catalyst upgrade`, one minor version at a time (§10).
+## Glossary
 
-## 1. First principle: a "locale" is your region primitive
-
-Catalyst has exactly one mechanism for mapping a URL subpath to a channel: **the
-locale**. There is no separate "region" or "market" concept. So a region becomes a
-locale, and `channels.config.ts` maps it to a channel.
-
-```ts
-// channels.config.ts
-const localeToChannelsMappings: Record<string, string> = {
-  'en-NZ': '1889993',
-  'en-AU': '1889990',
-};
-```
-
-The word is a poor fit when regions share a language — AU and NZ are both English —
-but it is the correct term for Next.js, next-intl, and BigCommerce alike. Use region
-subtags (`en-NZ`, `en-AU`) rather than inventing codes; BigCommerce validates against
-a fixed supported-locale list.
-
-**Constraints that follow from this choice:**
-
-| Constraint | Consequence |
+| Term | Meaning |
 | :-- | :-- |
-| One locale maps to one channel only | Two regions cannot share a locale code |
-| Max 5 locales per storefront | Max 5 regions |
-| Catalyst reads locales from **one** channel — the one in `BIGCOMMERCE_CHANNEL_ID` | That channel is the "config channel" and must carry **every** region's language and path. Other channels' languages are ignored by Catalyst |
+| Store | One catalog, customer base and set of API credentials |
+| Channel | A storefront within the store, with its own catalog assignments, languages, currencies, site URL and checkout domain. Storefront GraphQL has one endpoint per channel: `store-{hash}-{channelId}.mybigcommerce.com/graphql` |
+| Locale | A language on a channel, with an optional subfolder path |
+| Config channel | The channel in `BIGCOMMERCE_CHANNEL_ID`: where Catalyst reads locales from, and what every "no locale" code path falls back to |
 
-*This repo:* the config channel is NZ `1889993`, carrying `en-NZ` (default, path `nz`) and
-`en-AU` (path `au`). The AU channel `1889990` carries only `en-AU` (path `au`) — not read by
-Catalyst, but it keeps the control panel mirroring the storefront and is the language BigCommerce
-serves catalog translations in when AU requests arrive with `Accept-Language: en-AU`.
+## 1. The sandbox: NZ + AU
 
-This is the documented pattern: *"you only need to add locales to the Catalyst channel you
-created as it is the default channel for your Catalyst app, not both channels you are using."*
-Giving each channel only its own language breaks routing — the config channel then reports a
-single locale and every other region silently disappears within minutes.
+Everything a region needs, as configured on the sandbox store (www.catalyst-msf.store):
 
-## 2. The data flow
+| | NZ `1889993`: config channel, default region | AU `1889990` |
+| :-- | :-- | :-- |
+| URLs | `/nz/…` | `/au/…` |
+| Languages (control panel) | `en-NZ` → path `nz` (default), and `en-AU` → path `au` | `en-AU` → path `au` only |
+| `channels.config.ts` | `'en-NZ': '1889993'` | `'en-AU': '1889990'` |
+| Message file | `messages/en-NZ.json` = `{}` | `messages/en-AU.json` = `{}` |
+| Currency | NZD | AUD |
+| Site URL | The real domain: `www.catalyst-msf.store` (GraphQL reports it as the apex, see §8) | `au.catalyst-msf.store`, which Vercel 308-redirects to `www` with the path kept |
+| Checkout domain | `checkout.catalyst-msf.store` | `checkout.au.catalyst-msf.store` |
+| Makeswift | Default locale (Catalyst sends no locale for NZ) | A named locale `en-AU` on the same site |
 
-Locales are read from the **config channel at runtime**, KV-cached for 5 minutes
-(stale-while-revalidate):
+NZ carries **both** languages because Catalyst builds its routing from the config channel alone.
+AU's own `en-AU` language isn't read by Catalyst. It keeps the control panel consistent, and it is
+the language BigCommerce uses for AU's catalog translations. If you give NZ only `en-NZ`, `/au`
+disappears within about 5 minutes.
 
-```
-proxies/with-intl.ts ──► i18n/locale-config.ts (getLocaleRoutingForProxy) ──LocaleSettingsQuery──► BigCommerce
-                                   │  KV cache, 5 min
-                                   ▼
-                  i18n/locale-routing.ts (deriveLocaleRouting)
-                     locales · defaultLocale · prefixes · rootLocale
-                                   │
-            forwarded to the render in the x-bc-locale-routing header (getLocaleRouting)
-```
+**What happens for a request to `/au/shop-all`:**
 
-`build-config/build-config.json` (written at build/dev start) now holds only site URLs
-(`vanityUrl`, checkout, CDN). Site URL changes still need a redeploy.
+1. The NZ channel's locale list maps the `/au` prefix to `en-AU`.
+2. `channels.config.ts` maps `en-AU` to channel `1889990`.
+3. `shop-all` is resolved on the AU channel (`category/24`; on NZ the same slug is `category/33`).
+4. The page is priced in AUD, and the cart is created on the AU channel. It is kept separately
+   from any NZ cart in the same session.
+5. Checkout runs on `checkout.au.catalyst-msf.store`. Links back to the store ("Edit cart", emails)
+   go to `au.catalyst-msf.store/cart/`, which redirects to `www/cart/`. The `NEXT_LOCALE` cookie
+   then sends the shopper back to `/au/cart`.
 
-`prefixes` is the single source of truth for subpaths:
+A request with no locale (`/`, API routes, and similar) uses NZ. That works because NZ is both the
+config channel and the default language.
 
-| Consumer | Uses `prefixes` for |
-| :-- | :-- |
-| `i18n/locale-routing.ts` (`createRouting`) | next-intl routing |
-| `proxies/with-locale-aliases.ts` | mapping raw-code URLs (`/en-AU/...`) onto the real prefix |
-| `proxies/with-routes.ts` | stripping the prefix before asking BigCommerce to resolve a slug |
-| `lib/seo/canonical.ts` (`getLocalePrefix`) | canonical + hreflang URLs |
+**Adding another region means repeating the AU column.** Two things to know first:
 
-## 3. Per-request: the proxy chain
+- **Deploy the code first.** The mapping and `{}` message file are harmless before the locale
+  goes live. A locale that goes live without them 404s (no message file) or silently serves NZ
+  (no mapping).
+- **Set the subfolder path in the control panel.** The GraphQL Admin API's
+  `addLocale`/`updateLocale` have no path field. An empty path makes the URL `/<code>` and can hand
+  `/` to that locale (§6).
 
-`proxy.ts` composes ordered middleware. Order is load-bearing:
+Constraints:
+
+- A channel can have at most 5 locales, so the setup supports at most 5 regions.
+- Codes must be real region subtags (`en-AU`, not `au`), from BigCommerce's fixed list.
+- Two regions can't share a code.
+
+Steps:
+
+1. Add the mapping and the message file, then deploy.
+2. Set up the new channel as AU is: catalog assignments, its own language and path, currencies
+   (`PUT /v3/channels/{id}/currency-assignments`), a redirect-only site URL and a checkout domain.
+3. Add the language and path to NZ, the config channel.
+4. Add the locale in Makeswift.
+5. Add the redirect host in Vercel.
+6. Verify. Check locales with the command in §7. Then confirm the new prefix renders in its
+   currency, checkout works, and each region keeps its own cart.
+
+## 2. How a request is served
 
 ```
 withUcpProxy → withAuth → withMakeswift → withLocaleAliases → withIntl
              → withAnalyticsCookies → withChannelId → withGraphqlProxy → withRoutes
 ```
 
-1. **`withMakeswift`** flags builder (draft-mode) requests and disables next-intl's
-   cookie/`Accept-Language` detection for them.
-2. **`withLocaleAliases`** turns `/{localeCode}/...` into the real prefix — rewrite for
-   builder requests, 308 for everyone else (see §6).
-3. **`withIntl`** runs the next-intl middleware, resolves the locale, sets `x-bc-locale`.
-4. **`withChannelId`** calls `getChannelIdFromLocale()`, sets `x-bc-channel-id`.
-5. **`withRoutes`** asks BigCommerce to resolve the path *on that channel*, then
-   rewrites to the internal `/[locale]/...` route.
+The order matters:
 
-So the subpath determines the locale, the locale determines the channel, and the
-channel determines what a slug even means. The same slug legitimately resolves to
-different entities per channel — `/au/shop-all` → `category/24`,
-`/nz/shop-all` → `category/33` — and 404s where a category isn't assigned.
+| Proxy | Does |
+| :-- | :-- |
+| `withMakeswift` | Flags builder (draft-mode) requests and turns off cookie and `Accept-Language` detection for them |
+| `withLocaleAliases` | *Custom.* `/{code}/…` → real prefix (`/en-AU/x` → `/au/x`): rewritten for the builder, 308 for everyone else |
+| `withIntl` | Runs next-intl and sets `x-bc-locale`, `x-bc-locale-prefix` and `x-bc-locale-routing` (routing forwarded to the render) |
+| `withChannelId` | `getChannelIdFromLocale(x-bc-locale)` → `x-bc-channel-id` |
+| `withRoutes` | Strips the prefix, resolves the slug **on that channel**, and rewrites to `/[locale]/…` |
 
-**Locale resolution order** (next-intl, `resolveLocale.js`) — worth knowing precisely:
+The same slug can mean different things per channel. `/au/shop-all` → `category/24`, while
+`/nz/shop-all` → `category/33`. It 404s where the category isn't assigned.
 
-```
-1. locale prefix in the URL      (deep links, crawlers)
-2. NEXT_LOCALE cookie            (explicit user choice; written by the header switcher)
-3. Accept-Language negotiation
-4. routing.defaultLocale         (fallback)
-```
+**Locale routing** comes from `i18n/locale-config.ts`, which runs `LocaleSettingsQuery` against
+the config channel with a 5-minute KV cache (stale-while-revalidate). `i18n/locale-routing.ts`
+turns the result into `locales`, `defaultLocale`, `prefixes` and `rootLocale`. The `prefixes`
+map drives next-intl, the aliases, prefix stripping in `withRoutes`, and canonical URLs. The
+build snapshot `build-config/build-config.json` holds only site URLs (vanity, checkout, CDN).
 
-Step 3 is weak for same-language regions: `en-AU`/`en-NZ` only match on an exact
-region subtag, so the common `en-US,en;q=0.9` falls through to step 4. A `NEXT_LOCALE`
-cookie holding a code that is no longer in `locales` (e.g. a stale `en`) is ignored, not
-an error.
+**How `/` picks a locale** (next-intl `resolveLocale`):
 
-## 4. Server-side data fetching
+1. Prefix in the URL.
+2. `NEXT_LOCALE` cookie. next-intl writes it on any full-page visit whose locale differs from the
+   cookie, not only through the header switcher. Once a shopper opens `/au/…`, AU sticks. A
+   cookie holding a code that isn't served is ignored.
+3. `Accept-Language`, matched **best-fit**. Any English browser (`en-US`, `en-GB`, `en`) gets
+   the *first* English locale in the config channel's list. Today that's `en-NZ`, because
+   BigCommerce returns it first. Only an exact `en-AU` picks AU. If you reorder the languages,
+   US and UK visitors land somewhere else.
+4. The BigCommerce default locale.
 
-Requests go to a **channel-specific endpoint**:
+**Code paths with no request locale** fall back to `BIGCOMMERCE_CHANNEL_ID`. These are
+`next.config.ts`, API routes, proxies, `generateStaticParams`, the default KV namespace
+(`lib/kv/keys.ts`), and JWT logins without `channel_id` (`auth/index.ts`). Make the config channel
+your default region, as this repo does, so "no locale" and "default locale" mean the same channel.
 
-```
-https://store-{hash}-{channelId}.mybigcommerce.com/graphql
-```
+## 3. Per-channel behaviour
 
-`client/index.ts` resolves the channel per request via a `getChannelId` callback that
-calls next-intl's `getLocale()`. When `getLocale()` is unavailable it falls back to
-`BIGCOMMERCE_CHANNEL_ID`. That happens in more places than you'd expect:
+| Concern | Behaviour |
+| :-- | :-- |
+| **GraphQL** | `client/index.ts` → `lib/channel.ts` `getCurrentChannelId()` resolves the channel from next-intl's locale. It also sends the locale as `Accept-Language`, and a channel without that language falls back to its default without error |
+| **Cart** | Carts belong to the channel that created them. The session keeps `cartIds` keyed by channel (`lib/cart/`, a backport of upstream PR #3244), so each region keeps its own cart. `switchLocale` skips the cart locale sync when you switch to another channel |
+| **Currency** | If a request names no currency, Storefront GraphQL uses the **store** default, even on channels that don't offer it. AU would then price in NZD, and cart creation fails with "Currency not found". So `lib/currency.ts` `getPreferredCurrencyCode()` falls back to the channel's `defaultCurrency`, and ignores a `currencyCode` cookie the channel doesn't offer. Toggling a store currency's visibility can silently change channel assignments, so re-check them afterwards |
+| **Checkout** | `checkout/route.ts` is channel-aware, and each channel has its own checkout domain |
+| **SEO** | Stock Catalyst builds canonical URLs from the *requesting* channel's site URL, which would point AU at the redirect-only host. `getSiteBaseUrl()` (`lib/seo/canonical.ts`, also `metadataBase` in `app/[locale]/layout.tsx`) uses the config channel's `vanityUrl` from the build snapshot for every region |
+| **Default-region only** | `sitemap.xml`, `robots.txt` and `favicon.ico` call `getChannelIdFromLocale()` with no argument, so they serve the config channel only. Multi-region sitemaps need work |
+| **Links back from BigCommerce** | Checkout and email links use each channel's site URL (`au.…/cart/`). They land on `www` unprefixed, so the region comes from `NEXT_LOCALE` |
 
-- `next.config.ts` resolution · API routes · proxies
-- `lib/kv/keys.ts` — default KV cache namespace
-- `auth/index.ts` — when a JWT carries no `channel_id`
+## 4. Makeswift
 
-**Gotcha:** if your default *region* isn't the channel in `BIGCOMMERCE_CHANNEL_ID`,
-"unresolved locale" silently means a different channel than "default locale" does.
-Pick one and know which paths use which. *This repo avoids it:* the config channel
-(`BIGCOMMERCE_CHANNEL_ID`) is NZ `1889993` and its default language is `en-NZ`, so
-schema generation, locale config, the `/` redirect, sitemap, robots,
-favicon and every fallback above all mean NZ. The build-config `vanityUrl` (used for
-login and wishlist redirects) is NZ's too.
+Makeswift is a **separate** localization system, keyed per *site* rather than per channel.
 
-**Single-channel by design:** `sitemap.xml`, `robots.txt` and `favicon.ico` routes all
-call `getChannelIdFromLocale(defaultLocale)` — they reflect the default region only.
-Multi-region sitemaps need work. `checkout/route.ts` *is* channel-aware; each channel
-has its own checkout URL.
+- **Use one Makeswift site.** Creating a second Catalyst storefront also creates a second
+  Makeswift site. Ignore or delete it, and keep a single `MAKESWIFT_SITE_API_KEY`.
+- **Match the locales.** `lib/makeswift/client.ts` `normalizeLocale()` sends `undefined` for the
+  BigCommerce default (`en-NZ`) and the raw code otherwise. So Makeswift's default-locale content
+  *is* NZ, and `en-AU` must exist as a named locale.
+- **Pages vs Slots.** A Makeswift **Page** with no snapshot for the locale calls `notFound()`
+  (`lib/makeswift/page.tsx`). **Slots** degrade gracefully. That's why a 404 homepage can sit
+  next to working category and cart pages.
+- **The builder ignores custom prefixes.** It previews at `/en-AU/…`, and `withLocaleAliases`
+  maps that to `/au/…` (§2). Draft mode is detected with `unstable_isDraftModeRequest`, which
+  looks for the `makeswift-preview-token` param or the `__prerender_bypass` +
+  `makeswift-site-version` cookies.
+- **Local dev host URL** must be `http://localhost:3000`. `next dev` has no TLS, so an `https://`
+  host fails before the builder reaches the manifest.
+- Regional content genuinely differs, so treat per-locale pages as real authoring work rather
+  than duplication.
 
-**Domains: one storefront domain, but one site URL per channel.** BigCommerce won't let
-two channels share a site URL. So the config channel owns the real domain
-(`www.catalyst-msf.store`, checkout `checkout.catalyst-msf.store`), and every other channel
-gets a redirect-only host (AU: `au.catalyst-msf.store` → 308 to `www` in Vercel, path kept;
-checkout `checkout.au.catalyst-msf.store`). BigCommerce's links back from checkout and
-emails (site URL + site routes, e.g. "Edit cart" → `au.…/cart/`) land on `www` and pick the
-region from the `NEXT_LOCALE` cookie. Prefixing each site's routes (`/au/cart`, …) would make
-them cookie-independent — not done yet.
+## 5. Custom code on top of stock Catalyst
 
-**Canonical/hreflang use the config channel's URL.** Stock Catalyst builds absolute URLs
-from the *requesting* channel's site URL, which would make AU pages declare the
-redirect-only `au.` host and make hreflang disagree between regions. `getSiteBaseUrl()` in
-`lib/seo/canonical.ts` (also used for `metadataBase` in `app/[locale]/layout.tsx`) uses the
-config channel's `vanityUrl` from the build snapshot for every region instead. Frozen at
-build time, so site URL changes need a redeploy.
+| Change | Files | Why | Remove when |
+| :-- | :-- | :-- | :-- |
+| Locale → channel map | `channels.config.ts` | Stock map is empty | Never (it's config) |
+| Region message files | `messages/en-AU.json`, `en-NZ.json` (`{}`) | `i18n/request.ts` 404s a locale without one. `{}` deep-merges over `en.json`, which must stay as the base | Never |
+| Locale aliases | `proxies/with-locale-aliases.ts`, `proxy.ts` | Builder previews at `/en-AU` | Makeswift honours custom prefixes |
+| Single-origin SEO | `lib/seo/canonical.ts`, `app/[locale]/layout.tsx` | One public domain, many site URLs | Upstream supports it |
+| Per-channel carts | `lib/cart/*`, `lib/channel.ts`, `auth/*`, `client/index.ts`, login/logout/register/checkout routes | Backport of upstream PR #3244 | Upgrading to the release that includes #3244: take upstream's files |
+| Channel currency fallback | `lib/currency.ts` | Store default currency leaks into channels | Upstream fix |
+| Cross-channel locale switch | `components/header/_actions/switch-locale.ts` | Syncing the cart locale fails (`LocaleInvalidError`) on another channel's cart | Check against #3244 when it lands |
 
-**Carts are per channel.** A cart only exists on the channel that created it. The session
-stores `cartIds` keyed by channel (`lib/cart/`, `lib/channel.ts`, backported from upstream PR
-#3244), so each region keeps its own cart across switches. `switchLocale` skips cart locale
-sync when the target locale is on another channel.
+**Upgrading:** use `pnpm catalyst upgrade --ref @bigcommerce/catalyst-makeswift@<version>`.
+It three-way merges from `catalyst.ref` in `package.json` and needs a clean tree. Work on a
+branch, run `--dry-run` first, and go one minor version at a time. Afterwards run
+`pnpm install`, typecheck and `pnpm test`, then smoke-test every region. Re-check the files in
+the table above after each upgrade.
 
-**Currency is per channel.** Storefront GraphQL uses the **store** default currency when a
-request names none, even on a channel that doesn't enable it: AU would price in NZD, and cart
-creation fails with "Currency not found". `getPreferredCurrencyCode()` (`lib/currency.ts`)
-therefore falls back to the channel's own `defaultCurrency`, and ignores a `currencyCode`
-cookie the channel doesn't offer. Set each channel's currencies with
-`PUT /v3/channels/{id}/currency-assignments`. Toggling a store currency's visibility can
-silently change channel assignments, so re-check them afterwards.
+## 6. Decision: what lives at `/`
 
-## 5. Gotchas that cost real time
+`deriveLocaleRouting()` (`i18n/locale-routing.ts`) decides who owns `/`:
 
-**Set each language's subfolder path in the control panel, on the config channel.**
-`i18n/locale-routing.ts` only assigns a prefix when a path is set, so an empty path means
-next-intl silently uses the raw locale code as the segment (`/en-AU`, not `/au`), and
-also changes who owns `/` (§7). The GraphQL Admin API's `addLocale`/`updateLocale` have
-**no path field** — the control panel is the place. Changes reach the app within ~5 minutes
-(locale cache). Verify what Catalyst will see:
+1. If the default locale has no path, it lives at `/`.
+2. Otherwise, if exactly one non-default locale has no path, that one does.
+3. Otherwise nobody does. next-intl switches to `always` mode and `/` redirects.
+
+| Shape | `/` | Trade-off |
+| :-- | :-- | :-- |
+| A. Default region at `/` | Renders the default region | Stock and no code, but geo-redirecting means throwing away a rendered page |
+| **B. All prefixed (this repo)** | Redirects | A clean place to add geo or a region chooser. `/` never renders content |
+| C. Neutral locale at `/` | Renders a neutral variant | Costs a locale, and duplicates a region until a dispatcher replaces it |
+
+**Adding geolocation:** add a proxy before `withIntl`, using `withMakeswift`'s
+`x-bc-disable-locale-detection` as the precedent. Precedence should be cookie (explicit choice)
+first, then GeoIP, then `Accept-Language`. The existing `LocaleSwitcher`
+(`vibes/soul/primitives/navigation/index.tsx`) writes `NEXT_LOCALE`, so respect that cookie.
+
+## 7. Troubleshooting
+
+| Symptom | Cause / fix |
+| :-- | :-- |
+| Homepage 404 on **every** locale | The Makeswift site has no *published* pages. `curl -H "X-API-Key: $MAKESWIFT_SITE_API_KEY" "https://api.makeswift.com/v5/pages?version=ref:live"` returns an empty `data` |
+| Homepage 404 on **one** locale | The locale is missing in Makeswift |
+| Region vanished, or URLs show `/en-AU` instead of `/au` | The config channel lost that language or its path. Check the locales (below) |
+| An unexpected locale owns `/` | A stray language (e.g. bare `en`) with no path on the config channel. Remove it in the control panel rather than filtering it in code |
+| New region 404s everywhere | `messages/{code}.json` is missing, or the deploy hasn't happened |
+| Wrong currency, or "Currency not found" | The channel's currency assignments are wrong |
+| 404 right after a catalog change | The KV route cache is keyed by `(path, channel)` and lives 30 minutes (SWR). Logged-in shoppers bypass it. Re-request before investigating |
+| Builder: 401, or can't connect | Wrong key: `/api/makeswift/manifest?secret=<key>` should return 200 on the running host (the builder's Site ID isn't used). Local dev needs an `http://` host URL |
+| Second channel fails but the config channel works | The storefront token is channel-scoped (`channel_id` on `POST /v3/storefront/api-token`). Use a store-scoped token |
+| Dev page reloads forever, but `curl` shows a plain 200/404 | A stale Turbopack cache (the log shows `Failed to write app endpoint … Next.js package not found`). Run `rm -rf .next` and restart. **Check this before reading proxy code** |
+
+What Catalyst sees for locales:
 
 ```sh
 curl -s "https://store-$BIGCOMMERCE_STORE_HASH-$BIGCOMMERCE_CHANNEL_ID.mybigcommerce.com/graphql" \
   -H "Authorization: Bearer $BIGCOMMERCE_STOREFRONT_TOKEN" -H 'Content-Type: application/json' \
-  -d '{"query":"{ site { settings { locales { code isDefault path } } } }"}'
+  -d '{"query":"{ site { settings { url { vanityUrl } currency { defaultCurrency } locales { code isDefault path } } } }"}'
 ```
 
-**Stray languages on the config channel become served locales.** Any language there
-(e.g. a leftover bare `en`) turns into a route and, if it has no path, can claim `/`.
-Remove it in the control panel rather than filtering it in app code.
+Swap in another channel ID to check its site URL and default currency.
 
-**BigCommerce tolerates an unknown `Accept-Language`.** The client sends the locale code
-per request; a channel without that language falls back to its default without error.
+## 8. Known gaps
 
-**Every served locale needs `messages/{locale}.json`.** `i18n/request.ts` imports
-it and 404s if absent, as it does for any locale not in the locale routing. For a region
-that shares a language, `{}` is correct — the file is deep-merged over `en`, inheriting
-every string. `messages/en.json` must stay even though `en` is not a served locale: it is
-the fallback the merge starts from.
+- **Canonical host:** NZ's site URL is `https://www.catalyst-msf.store` in the control panel and
+  REST (`GET /v3/channels/1889993/site`). Storefront GraphQL `settings.url.vanityUrl` returns it
+  without the `www.`, and re-saving it doesn't help. The build snapshot takes its site URL from
+  GraphQL, so canonical, hreflang and `og:url` point at the apex, which Vercel 308s to `www`.
+- next-intl's `Link` response header puts `x-default` at the unprefixed URL, which redirects.
+  The page metadata is correct (`/nz/…`). Either set `alternateLinks: false` in `createRouting`
+  or live with it.
+- Sitemap and robots cover the default region only (§3).
+- BigCommerce site routes (`/cart/`, …) are unprefixed, so links back from checkout rely on the
+  cookie. Prefixing them per channel (`/au/cart`) would remove that dependency.
+- `TRAILING_SLASH=false` in this repo. It affects route comparison and canonical URLs, and
+  BigCommerce generates trailing slashes by default.
 
-**A dev-only infinite reload loop is a stale Turbopack cache, not routing.** Symptom: a
-page reloads forever in the browser but `curl` shows a plain 404/200 with no redirect
-chain, and the dev log repeats `FATAL: ... Failed to write app endpoint ... Next.js package
-not found`. The HMR client reloads on every panic. `rm -rf .next` and restart. Check this
-before reading a single line of proxy code — it cost an afternoon.
+## References
 
-**Storefront API tokens can be channel-scoped.** Tokens minted via
-`POST /v3/storefront/api-token` accept a `channel_id`. A store-scoped token works
-across all channels; a channel-scoped one won't. Test yours against a second channel
-before debugging anything else.
-
-**The KV route cache is keyed by `(pathname, channelId)`** and served
-stale-while-revalidate. Since `clearLocaleFromPath` strips the prefix first, the root
-URL and the prefix for the *same* channel share a key. After catalog changes, expect
-one stale 404; re-request before investigating.
-
-**`TRAILING_SLASH`** affects route comparison (`normalizeForCompare`) and canonical
-URLs. BigCommerce generates trailing slashes by default.
-
-## 6. Makeswift concerns
-
-Makeswift is a **separate** localization system that must be configured to match. It
-is keyed per *site*, not per channel.
-
-- **A homepage 404 on every locale means the site has no published pages**, not a
-  locale problem. Check before anything else:
-  `curl -H "X-API-Key: $MAKESWIFT_SITE_API_KEY" "https://api.makeswift.com/v5/pages?version=ref:live"`
-  — an empty `data` array is your answer. Draft pages need a preview token and won't show.
-- **Verify the key against the running host**, not the dashboard:
-  `/api/makeswift/manifest?secret=<key>` returns 200 for the right key, 401 otherwise.
-  The builder's *Site ID* is not used by the app; only the Site API key is.
-- **Add the same locales in Makeswift** that you added in the control panel. Missing
-  locales are the next most common cause of a mysterious homepage 404.
-- **The builder ignores custom prefixes.** Makeswift previews localized pages at
-  `/{localeCode}/...` (`/en-AU/shop-all`), never at `/au/...`. `proxies/with-locale-aliases.ts`
-  (before `withIntl` in `proxy.ts`) maps the raw code onto the real prefix: draft-mode
-  requests are rewritten in place, public requests get a 308 to the canonical URL. Draft
-  mode is detected via `unstable_isDraftModeRequest` — the `makeswift-preview-token` query
-  param or the `__prerender_bypass` + `makeswift-site-version` cookies. (The similarly named
-  `makeswiftRewritePreviewToken` is a different thing: the plugin's rewrite-rule match.)
-- **Host URL must be `http://localhost:3000` for local dev** — `next dev` has no TLS, so an
-  `https://` host URL fails the TLS handshake before the builder ever reaches the manifest.
-- `lib/makeswift/client.ts` → `normalizeLocale()` passes `undefined` for the default
-  locale and the raw code otherwise. "Default" here is the **BigCommerce** default locale
-  (`en-NZ`), so Makeswift's default-locale content *is* the NZ storefront and `en-AU` must
-  exist as a named Makeswift locale. A full Makeswift **Page** with no snapshot for that
-  locale calls `notFound()` (`lib/makeswift/page.tsx`). Makeswift **Slots** on
-  otherwise-normal pages degrade gracefully — which is why a 404 homepage can sit
-  alongside working category and cart pages.
-- Creating a second Catalyst storefront also creates a **second Makeswift site**. For
-  a single-app multi-channel setup you want **one** Makeswift site with locales inside
-  it; ignore or delete the extra one and keep a single `MAKESWIFT_SITE_API_KEY`.
-- Regional content genuinely diverges (different merchandising, campaigns, imagery),
-  so treat per-locale Makeswift pages as real authoring surface, not duplication.
-
-## 7. What happens at the bare domain — a real decision
-
-`deriveLocaleRouting()` in `i18n/locale-routing.ts` decides who owns `/`:
-
-1. Default locale has no path → it lives at `/`.
-2. Else if exactly one non-default locale has no path → that one lives at `/`.
-3. Otherwise → **nobody**; next-intl switches to `always` mode and every locale is
-   prefixed.
-
-Under rule 3, `/` stops being a page and becomes a **redirect**. Three viable shapes:
-
-| Shape | `/` behaviour | Trade-off |
-| :-- | :-- | :-- |
-| **A.** Default region at `/`, others prefixed | renders the default region | Stock Catalyst, zero extra code. But `/` *is* a storefront, so geo-redirecting away from it means discarding a rendered page. |
-| **B.** All regions prefixed, nothing at `/` | redirects | Clean dispatcher, ideal for a geo/chooser step. Requires `rootLocale` to be `null`, and `/` never renders content. |
-| **C.** Neutral locale at `/`, regions prefixed alongside | renders a neutral variant | Both `/au` and `/nz` are real URLs *and* `/` still renders. Costs an extra locale, and `/` duplicates a region's content until a dispatcher replaces it. |
-
-*This repo uses B:* every region is prefixed and `/` only redirects. Both config-channel
-languages have a path, so stock `deriveLocaleRouting` sets `rootLocale` to `null` and next-intl runs in
-`always` mode — no app code needed. The redirect target is whatever next-intl resolves —
-`NEXT_LOCALE` cookie, then `Accept-Language`, then the BigCommerce default (`en-NZ` →
-`/nz`). A geolocation or region-chooser step can replace that resolution later without
-touching the locale model. `en` is not a BigCommerce language; it remains the message
-fallback (`messages/en.json`) only.
-
-**Known rough edge under B:** next-intl's own `Link` response header advertises
-`hreflang="x-default"` at the *unprefixed* URL, which now redirects. The page-level
-metadata from `lib/seo/canonical.ts` correctly points `x-default` at the default region
-(`/nz/...`). Either disable `alternateLinks` in `i18n/locale-routing.ts` or accept the redirecting
-header until the dispatcher lands.
-
-**Adding geolocation.** Layer it in front of next-intl rather than replacing the
-resolution order — cookie (explicit choice) should still beat GeoIP, and GeoIP should
-beat `Accept-Language`. Add a proxy before `withIntl`; `proxies/with-makeswift.ts` is
-the precedent, setting `x-bc-disable-locale-detection` to suppress next-intl's own
-detection and take over. A manual switcher already exists
-(`vibes/soul/primitives/navigation/index.tsx` → `LocaleSwitcher`) and persists via
-`NEXT_LOCALE`, so honour that cookie or you'll override the shopper's choice.
-
-Note `syncCookie` writes `NEXT_LOCALE` whenever the resolved locale differs from what
-`Accept-Language` alone would give — so region choice becomes sticky after one visit.
-
-## 8. Where to look
-
-| File | Role |
-| :-- | :-- |
-| `channels.config.ts` | locale → channel map |
-| `i18n/locale-config.ts` | runtime locale settings from the config channel (KV-cached) |
-| `i18n/locale-routing.ts` | derives `locales`, `defaultLocale`, `prefixes`, `rootLocale`; next-intl routing |
-| `i18n/request.ts` | per-locale message loading |
-| `proxy.ts` + `proxies/*` | ordered request pipeline |
-| `proxies/with-makeswift.ts` | flags builder requests, disables locale detection for them |
-| `proxies/with-locale-aliases.ts` | `/en-AU/...` → `/au/...` (rewrite for builder, 308 for public) |
-| `proxies/with-channel-id.ts` | sets `x-bc-channel-id` |
-| `proxies/with-routes.ts` | per-channel slug resolution |
-| `client/index.ts` | channel-aware GraphQL client |
-| `lib/channel.ts` | current request's channel |
-| `lib/cart/` | per-channel cart ids |
-| `lib/currency.ts` | per-channel currency fallback |
-| `lib/seo/canonical.ts` | canonical + hreflang |
-| `lib/makeswift/client.ts` | Makeswift locale normalization |
-| `build-config/` | build-time site URL snapshot |
-
-## 9. References
-
-- [Catalyst Multi-Storefront: overview](https://developer.bigcommerce.com/docs/storefront/catalyst/features/localization/multi-storefront) · [setup](https://developer.bigcommerce.com/docs/storefront/catalyst/features/localization/multi-storefront/setup)
-- [Catalyst multi-language setup](https://developer.bigcommerce.com/docs/storefront/catalyst/features/localization/multi-language/setup) · [static translations](https://developer.bigcommerce.com/docs/storefront/catalyst/features/localization/static-translations)
-- [Locales configuration (GraphQL Admin API)](https://developer.bigcommerce.com/docs/store-operations/settings/locales) — add/update/delete locales per channel
-- [MSF international enhancements](https://developer.bigcommerce.com/docs/store-operations/catalog/msf-international-enhancements/overview) — translating catalog data
-- [Multi-storefront overview](https://developer.bigcommerce.com/docs/storefront/multi-storefront)
-- [next-intl routing & middleware](https://next-intl.dev/docs/routing) — prefix modes, locale detection
-- [Google: managing multi-regional and multilingual sites](https://developers.google.com/search/docs/specialty/international/managing-multi-regional-sites)
-
-## 10. Upgrading Catalyst
-
-`pnpm catalyst upgrade --ref @bigcommerce/catalyst-makeswift@<version>` three-way merges
-upstream changes into this repo, using `catalyst.ref` in `package.json` as the base. It needs a
-clean git tree; conflicts get standard markers. Work on a branch, `--dry-run` first, go one
-minor version at a time, then `pnpm install`, typecheck, `pnpm test` and smoke-test both
-regions. When upgrading to the release that includes upstream PR #3244, take upstream's
-version of the per-channel cart files.
+- Catalyst: [multi-storefront](https://developer.bigcommerce.com/docs/storefront/catalyst/features/localization/multi-storefront) · [MSF setup](https://developer.bigcommerce.com/docs/storefront/catalyst/features/localization/multi-storefront/setup) · [multi-language](https://developer.bigcommerce.com/docs/storefront/catalyst/features/localization/multi-language/setup) · [static translations](https://developer.bigcommerce.com/docs/storefront/catalyst/features/localization/static-translations). The docs' own guidance: *"you only need to add locales to the Catalyst channel … not both channels."*
+- BigCommerce: [locales (Admin GraphQL)](https://developer.bigcommerce.com/docs/store-operations/settings/locales) · [MSF international enhancements](https://developer.bigcommerce.com/docs/store-operations/catalog/msf-international-enhancements/overview) · [multi-storefront](https://developer.bigcommerce.com/docs/storefront/multi-storefront)
+- [next-intl routing](https://next-intl.dev/docs/routing) · [Google: multi-regional sites](https://developers.google.com/search/docs/specialty/international/managing-multi-regional-sites)
