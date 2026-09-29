@@ -3,7 +3,17 @@
 How to serve multiple BigCommerce storefront channels from a **single** Catalyst app,
 with each channel on its own URL subpath. Examples use two channels — NZ (`1889993`) and AU (`1889990`) — but nothing here is specific to that pair.
 
----
+## tl;dr
+
+One Catalyst app serves several BigCommerce channels by treating each region as a locale: the URL subpath picks the locale, and the locale picks the channel.
+
+- Config channel (BIGCOMMERCE_CHANNEL_ID, NZ 1889993) carries every region's language and subfolder path: en-NZ → nz (default), en-AU → au.
+- Other channels carry only their own language (AU: en-AU). Catalyst ignores them.
+- channels.config.ts maps each locale to its channel: en-NZ → 1889993, en-AU → 1889990.
+- / has no storefront; it redirects to a region using the cookie, then Accept-Language, then the default (/nz).
+- Locales are read at build time, so a control-panel change only takes effect after restarting dev or redeploying.
+- Makeswift needs the same locales; its default locale must match the BigCommerce default (en-NZ).
+- Custom code on top of stock is just the channel mapping, with-locale-aliases.ts (the Makeswift builder previews at /en-AU rather than /au), and the empty en-AU/en-NZ message files.
 
 ## 1. First principle: a "locale" is your region primitive
 
@@ -42,8 +52,6 @@ created as it is the default channel for your Catalyst app, not both channels yo
 Giving each channel only its own language breaks routing — the config channel then reports a
 single locale and every other region silently disappears on the next build.
 
----
-
 ## 2. The data flow
 
 Locales are read from BigCommerce **at build time** and frozen into a JSON file:
@@ -76,8 +84,6 @@ truth for subpaths, consumed in four unrelated places:
 
 Change subpaths in one place and all four follow. Change them anywhere else and they
 silently disagree.
-
----
 
 ## 3. Per-request: the proxy chain
 
@@ -116,8 +122,6 @@ region subtag, so the common `en-US,en;q=0.9` falls through to step 4. A `NEXT_L
 cookie holding a code that is no longer in `locales` (e.g. a stale `en`) is ignored, not
 an error.
 
----
-
 ## 4. Server-side data fetching
 
 Requests go to a **channel-specific endpoint**:
@@ -152,8 +156,6 @@ from the *requesting* channel's site URL, so `/au/*` pages emit `store-…-18899
 `/nz/*` pages emit `store-…-1889993…` hosts — even for their hreflang alternates. With one
 app on one domain, both channels' site URLs (or the canonical base) must resolve to that
 domain. Unresolved in this repo.
-
----
 
 ## 5. Gotchas that cost real time
 
@@ -202,8 +204,6 @@ one stale 404; re-request before investigating.
 **`TRAILING_SLASH`** affects route comparison (`normalizeForCompare`) and canonical
 URLs. BigCommerce generates trailing slashes by default.
 
----
-
 ## 6. Makeswift concerns
 
 Makeswift is a **separate** localization system that must be configured to match. It
@@ -239,8 +239,6 @@ is keyed per *site*, not per channel.
   it; ignore or delete the extra one and keep a single `MAKESWIFT_SITE_API_KEY`.
 - Regional content genuinely diverges (different merchandising, campaigns, imagery),
   so treat per-locale Makeswift pages as real authoring surface, not duplication.
-
----
 
 ## 7. What happens at the bare domain — a real decision
 
@@ -283,8 +281,6 @@ detection and take over. A manual switcher already exists
 
 Note `syncCookie` writes `NEXT_LOCALE` whenever the resolved locale differs from what
 `Accept-Language` alone would give — so region choice becomes sticky after one visit.
-
----
 
 ## 8. Where to look
 
