@@ -1,21 +1,23 @@
 import { unstable_isDraftModeRequest } from '@makeswift/runtime/next/middleware';
 import { NextRequest, NextResponse } from 'next/server';
 
-import { locales, prefixes } from '~/i18n/locales';
+import { getLocaleRoutingForProxy } from '~/i18n/locale-config';
+import { LocaleRouting } from '~/i18n/locale-routing';
 
 import { type ProxyFactory } from './compose-proxies';
 
 // Locales whose public URL prefix differs from their raw code, e.g. `en-AU` → `/au`.
 // The raw code (`/en-AU`) is accepted as an alias for the real prefix.
-const aliases = locales.flatMap((locale) => {
-  const prefix = prefixes[locale];
+const getAliases = ({ locales, prefixes }: LocaleRouting) =>
+  locales.flatMap((locale) => {
+    const prefix = prefixes[locale];
 
-  if (!prefix || prefix.toLowerCase() === `/${locale.toLowerCase()}`) return [];
+    if (!prefix || prefix.toLowerCase() === `/${locale.toLowerCase()}`) return [];
 
-  return [{ alias: `/${locale.toLowerCase()}`, prefix }];
-});
+    return [{ alias: `/${locale.toLowerCase()}`, prefix }];
+  });
 
-const resolveAlias = (pathname: string) => {
+const resolveAlias = (pathname: string, aliases: ReturnType<typeof getAliases>) => {
   const lower = pathname.toLowerCase();
   const match = aliases.find(({ alias }) => lower === alias || lower.startsWith(`${alias}/`));
 
@@ -26,7 +28,7 @@ const resolveAlias = (pathname: string) => {
 
 // The Makeswift builder ignores our custom regional prefixes and always previews
 // pages at `/{localeCode}/...` (`/en-AU/shop-all`). Map those URLs onto the real
-// prefixes from `i18n/locales.ts`:
+// prefixes from the BigCommerce locale routing (`~/i18n/locale-config`):
 //
 // - Builder (draft-mode) requests are rewritten in place, so the iframe URL the
 //   builder chose keeps working without a redirect.
@@ -35,8 +37,15 @@ const resolveAlias = (pathname: string) => {
 //
 // Must run before `withIntl`, which is what interprets the prefix.
 export const withLocaleAliases: ProxyFactory = (next) => {
-  return (request, event) => {
-    const aliased = resolveAlias(request.nextUrl.pathname);
+  return async (request, event) => {
+    // Same KV-cached lookup `withIntl` makes next. When it's unavailable, `withIntl` answers 503.
+    const localeRouting = await getLocaleRoutingForProxy(event);
+
+    if (!localeRouting) {
+      return next(request, event);
+    }
+
+    const aliased = resolveAlias(request.nextUrl.pathname, getAliases(localeRouting));
 
     if (aliased === null) {
       return next(request, event);

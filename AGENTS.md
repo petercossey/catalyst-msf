@@ -278,3 +278,13 @@ export default async function ProductPage({ params, searchParams }: Props) {
 This codebase differs significantly from typical Next.js applications due to the custom routing proxy and e-commerce-specific patterns. The `with-routes` proxy (composed within `proxy.ts`) essentially turns Next.js into a headless CMS router, where content structure is determined by the BigCommerce backend rather than the filesystem. Understanding this fundamental difference is crucial for working effectively with the codebase.
 
 The Streamable pattern and PPR integration provide excellent user experience through progressive loading, but require understanding of React's newer concurrent features like the `use()` hook and Suspense boundaries.
+
+<!-- BEGIN:nextjs-agent-rules -->
+
+# This is NOT the Next.js you know
+
+This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
+
+This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
+
+<!-- END:nextjs-agent-rules -->
