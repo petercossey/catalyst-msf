@@ -4,12 +4,14 @@ import { withAuth } from './proxies/with-auth';
 import { withChannelId } from './proxies/with-channel-id';
 import { withGraphqlProxy } from './proxies/with-graphql-proxy';
 import { withIntl } from './proxies/with-intl';
+import { withLocaleAliases } from './proxies/with-locale-aliases';
 import { withMakeswift } from './proxies/with-makeswift';
 import { withRoutes } from './proxies/with-routes';
 
 export const proxy = composeProxies(
   withAuth,
   withMakeswift,
+  withLocaleAliases,
   withIntl,
   withAnalyticsCookies,
   withChannelId,
