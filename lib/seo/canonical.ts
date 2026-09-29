@@ -1,5 +1,6 @@
 import { buildConfig } from '~/build-config/reader';
-import { defaultLocale, locales, prefixes, rootLocale } from '~/i18n/locales';
+import { getLocaleRouting } from '~/i18n/locale-config';
+import { getLocalePrefix, LocaleRouting } from '~/i18n/locale-routing';
 
 interface CanonicalUrlOptions {
   /**
@@ -29,26 +30,33 @@ interface CanonicalUrlOptions {
  * @param {CanonicalUrlOptions} options - The options for generating canonical URLs
  * @returns {object} The metadata alternates object with canonical URL and optional language alternates
  */
-// Kept async so the existing `await getMetadataAlternates(...)` call sites are unchanged.
-// eslint-disable-next-line @typescript-eslint/require-await
 export async function getMetadataAlternates(options: CanonicalUrlOptions) {
   const { path, locale, includeAlternates = true } = options;
 
   const baseUrl = getSiteBaseUrl();
 
-  const canonical = buildLocalizedUrl(baseUrl, path, locale);
+  // Subfolders are merchant-configured and read at runtime, so canonical and hreflang URLs stay
+  // correct without a redeploy — and stay in agreement with what the proxy resolves.
+  const localeRouting = await getLocaleRouting();
+
+  const canonical = buildLocalizedUrl(baseUrl, path, locale, localeRouting);
 
   if (!includeAlternates) {
     return { canonical };
   }
 
-  const languages = locales.reduce<Record<string, string>>((acc, loc) => {
-    acc[loc] = buildLocalizedUrl(baseUrl, path, loc);
+  const languages = localeRouting.locales.reduce<Record<string, string>>((acc, loc) => {
+    acc[loc] = buildLocalizedUrl(baseUrl, path, loc, localeRouting);
 
     return acc;
   }, {});
 
-  languages['x-default'] = buildLocalizedUrl(baseUrl, path, defaultLocale);
+  languages['x-default'] = buildLocalizedUrl(
+    baseUrl,
+    path,
+    localeRouting.defaultLocale,
+    localeRouting,
+  );
 
   return { canonical, languages };
 }
@@ -74,15 +82,20 @@ export function getSiteBaseUrl(): string {
   return buildConfig.get('urls').vanityUrl;
 }
 
-function buildLocalizedUrl(baseUrl: string, pathname: string, locale: string): string {
+function buildLocalizedUrl(
+  baseUrl: string,
+  pathname: string,
+  locale: string,
+  localeRouting: LocaleRouting,
+): string {
   const trailingSlash = process.env.TRAILING_SLASH !== 'false';
 
   const url = new URL(pathname, baseUrl);
 
-  const prefix = prefixes[locale] ?? `/${locale}`;
-  const skipPrefix = locale === rootLocale;
+  // Empty for the locale served unprefixed at "/".
+  const prefix = getLocalePrefix(localeRouting, locale);
 
-  url.pathname = skipPrefix ? url.pathname : `${prefix}${url.pathname}`;
+  url.pathname = `${prefix}${url.pathname}`;
 
   if (trailingSlash && !url.pathname.endsWith('/')) {
     url.pathname += '/';

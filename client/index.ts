@@ -1,6 +1,6 @@
 import { BigCommerceAuthError, createClient } from '@bigcommerce/catalyst-client';
 
-import { getChannelIdFromLocale } from '../channels.config';
+import { getCurrentChannelId } from '../lib/channel';
 import { backendUserAgent } from '../user-agent';
 
 // next/headers, next/navigation, and next-intl/server are imported dynamically
@@ -12,7 +12,8 @@ import { backendUserAgent } from '../user-agent';
 //
 // During config resolution, the dynamic import of next-intl/server succeeds but
 // getLocale() throws ("not supported in Client Components") — the try/catch
-// below absorbs this gracefully, and getChannelId falls back to defaultChannelId.
+// below absorbs this gracefully. The channel itself is resolved by
+// getCurrentChannelId(), which falls back to the default channel.
 
 const getLocale = async () => {
   try {
@@ -41,24 +42,11 @@ export const client = createClient({
   logger:
     (process.env.NODE_ENV !== 'production' && process.env.CLIENT_LOGGER !== 'false') ||
     process.env.CLIENT_LOGGER === 'true',
-  getChannelId: async (defaultChannelId: string) => {
-    const locale = await getLocale();
-
-    // We use the default channelId as a fallback, but it is not ideal in some scenarios.
-    return getChannelIdFromLocale(locale) ?? defaultChannelId;
-  },
+  getChannelId: (defaultChannelId: string) => getCurrentChannelId(defaultChannelId),
   beforeRequest: async (fetchOptions) => {
     // We can't serialize a `Headers` object within this method so we have to opt into using a plain object
     const requestHeaders: Record<string, string> = {};
     const locale = await getLocale();
-
-    try {
-      const { getCorrelationId } = await import('./correlation-id');
-
-      requestHeaders['X-Correlation-ID'] = getCorrelationId();
-    } catch {
-      // correlation-id imports React.cache which is unavailable during next.config.ts resolution
-    }
 
     if (fetchOptions?.cache && ['no-store', 'no-cache'].includes(fetchOptions.cache)) {
       const { headers } = await import('next/headers');
@@ -68,6 +56,13 @@ export const client = createClient({
         requestHeaders['X-Forwarded-For'] = ipAddress;
         requestHeaders['True-Client-IP'] = ipAddress;
       }
+
+      // Only sent on uncacheable requests. The correlation ID is unique per request, and Next.js
+      // includes request headers in the Data Cache key, so sending it alongside
+      // `next: { revalidate }` makes every lookup miss and write a fresh entry.
+      const { getCorrelationId } = await import('./correlation-id');
+
+      requestHeaders['X-Correlation-ID'] = getCorrelationId();
     }
 
     if (locale) {
